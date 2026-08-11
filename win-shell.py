@@ -1,18 +1,15 @@
 #!/usr/bin/env python3
 """
-win-shell.py -  Windows remote-access helper
+win-shell.py -  Windows remote-access helper - Tries common Windows remote execution methods and launches the first, interactive shell that succeeds.
 
-Tries common Windows remote execution methods and launches the first
-interactive shell that succeeds.
-
-Requirements on Kali:
-  sudo apt install netexec impacket-scripts evil-winrm
-
-Examples:
+$> sudo apt install netexec impacket-scripts && sudo gem install evil-winrm && chmod +x win-shell.py && sudo cp win-shell.py /usr/local/bin/win-shell #(Requirements)
+$> win-shell -t 192.168.230.96 -u administrator -p 'Password123' #(Usage)
+  
+Other Examples:
   win-shell -t 10.10.10.10 -u administrator -p 'Password123'
-  win-shell -t 10.10.10.10 -d SECURA -u administrator -p 'Password123'
+  win-shell -t 10.10.10.10 -d DOMAIN.COM -u administrator -p 'Password123'
   win-shell -t 10.10.10.10 -u administrator -H 'NTHASH'
-  win-shell -t 10.10.10.10 -d SECURA -u administrator -H 'NTHASH'
+  win-shell -t 10.10.10.10 -d DOMAIN.COM -u administrator -H 'NTHASH'
 
 Force a method:
   win-shell -t 10.10.10.10 -u admin -p 'Password' --method winrm
